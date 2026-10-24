@@ -191,6 +191,17 @@
       if (e.code === 'Escape') G.debugPanel = false;
       return;
     }
+    if (G.state === 'achievements') {
+      if (e.code === 'Escape' || e.code === 'KeyP') closeAchievements();
+      else if (e.code === 'ArrowLeft') applyAchievementPage(-1);
+      else if (e.code === 'ArrowRight') applyAchievementPage(1);
+      return;
+    }
+    if ((G.state === 'dead' || G.state === 'win') && e.code === 'Escape') {
+      G.state = 'menu';
+      G.uiButtons.length = 0;
+      return;
+    }
     if (G.state === 'stats') {
       if (e.code === 'Escape' || e.code === 'KeyP') backToMenu();
       return;
@@ -441,6 +452,7 @@
     totalTime: 0,
     stats: emptyStatsMap(),
     detail: emptyDetail(),
+    achievements: {},
     run: null,
   };
 
@@ -473,6 +485,7 @@
     SaveData.totalTime = 0;
     SaveData.stats = emptyStatsMap();
     SaveData.detail = emptyDetail();
+    SaveData.achievements = {};
     SaveData.run = null;
   }
 
@@ -537,6 +550,13 @@
       };
     }
     adoptDetail(data.detail);
+    // 成就是后加的字段：旧存档没有时保持空表，导入时只认当前定义过的成就
+    if (data.achievements && typeof data.achievements === 'object') {
+      for (const a of ACHIEVEMENTS) {
+        const at = data.achievements[a.id];
+        if (typeof at === 'number' && isFinite(at) && at > 0) SaveData.achievements[a.id] = at;
+      }
+    }
     // 突然死亡没解锁时不能直接用（比如导入了别人的存档）
     if (SaveData.difficulty === 'sudden' && !suddenUnlocked()) SaveData.difficulty = 'easy';
     if (data.run && typeof data.run === 'object' && data.run.wave) SaveData.run = data.run;
@@ -633,6 +653,7 @@
       }
     }
     SaveData.run = null;
+    evaluateAchievements(won);
     persistSave();
   }
 
@@ -669,9 +690,10 @@
         throw new Error('哈希校验失败，文件可能被改动');
       }
       adoptSaveData(outer.data, true);
+      const gained = backfillAchievements(false);
       persistSave();
       AC.muted = SaveData.muted;
-      notifyMenu('存档导入成功', 5000);
+      notifyMenu(gained ? '存档导入成功，补发 ' + gained + ' 个成就' : '存档导入成功', 5000);
       return true;
     } catch (e) {
       notifyMenu('导入失败：' + e.message, 6000);
@@ -727,7 +749,7 @@
 
   // ---------------- 游戏状态 ----------------
   const G = {
-    state: 'menu',          // menu | stats | playing | shop | dead | win
+    state: 'menu',          // menu | stats | achievements | playing | shop | dead | win
     paused: false,
     speedMul: 1,            // 1 / 2 / 4 倍速
     difficulty: 'easy',     // easy | normal | hard | sudden
@@ -798,10 +820,165 @@
     shopHint: '',
     shopHintT: 0,
 
+    newAchievements: [],
+    achvReturn: 'menu',
+    achvPage: 0,
+
     bestWave: 1,
   };
 
+  // ---------------- 成就 ----------------
+  // 稀有度从低到高：普通、稀有、超稀有、史诗、神话、传奇
+  const RARITIES = {
+    common:    { name: '普通',   color: '#E8F2FF', rank: 0 },
+    rare:      { name: '稀有',   color: '#7DFF9B', rank: 1 },
+    superrare: { name: '超稀有', color: '#5AD1FF', rank: 2 },
+    epic:      { name: '史诗',   color: '#B388FF', rank: 3 },
+    mythic:    { name: '神话',   color: '#FF5A5A', rank: 4 },
+    legendary: { name: '传奇',   color: '#FFD166', rank: 5 },
+  };
+
+  function buyTotal(kind) {
+    const src = SaveData.detail.buys[kind] || {};
+    let n = 0;
+    for (const key of Object.keys(src)) n += Math.max(0, Math.round(src[key] || 0));
+    return n;
+  }
+
+  const ACHIEVEMENTS = [
+    {
+      id: 'easy_clear', name: '初入装机世界', rarity: 'common', badge: '01',
+      condition: '通关一次简单模式', desc: '玩家的一小步，装机的一大步。',
+      test: (c) => (c.won && c.difficulty === 'easy') || c.stats.easy.bestClear > 0,
+    },
+    {
+      id: 'first_cpu', name: '第一块CPU', rarity: 'common', badge: 'CPU',
+      condition: '第一次购买一块任意的CPU', desc: '小方块，大魔力。',
+      test: (c) => c.buys.cpu > 0,
+    },
+    {
+      id: 'first_gpu', name: '第一张显卡', rarity: 'common', badge: 'GPU',
+      condition: '第一次购买任意一张显卡', desc: '这是什么，鲜咔！',
+      test: (c) => c.buys.gpu > 0,
+    },
+    {
+      id: 'first_ram', name: '第一根内存条', rarity: 'common', badge: 'RAM',
+      condition: '第一次购买任意一根内存条', desc: '或许它比金条还要贵呢。',
+      test: (c) => c.buys.ram > 0,
+    },
+    {
+      id: 'first_ssd', name: '第一块SSD', rarity: 'common', badge: 'SSD',
+      condition: '第一次购买任意一块SSD', desc: '小盒子，装下大世界。',
+      test: (c) => c.buys.ssd > 0,
+    },
+    {
+      id: 'first_software', name: '第一款软件', rarity: 'common', badge: 'APP',
+      condition: '第一次购买任意一款软件', desc: '硬件与软件的结合才是完美装机！',
+      test: (c) => c.buys.software > 0,
+    },
+    {
+      id: 'normal_clear', name: '探索装机世界', rarity: 'rare', badge: '02',
+      condition: '第一次通关普通模式', desc: '硬件与软件的碰撞，成就狂野的大肥鱼！',
+      test: (c) => (c.won && c.difficulty === 'normal') || c.stats.normal.bestClear > 0,
+    },
+    {
+      id: 'hard_clear', name: '深入装机世界', rarity: 'epic', badge: '03',
+      condition: '第一次通关困难模式', desc: '我来这里就办三件事，装机，装机，还是装机！',
+      test: (c) => (c.won && c.difficulty === 'hard') || c.stats.hard.bestClear > 0,
+    },
+  ];
+
+  // 按稀有度从低到高展示；同稀有度保持配置顺序
+  ACHIEVEMENTS.sort((a, b) => (RARITIES[a.rarity] || RARITIES.common).rank - (RARITIES[b.rarity] || RARITIES.common).rank);
+
+  const ACHIEVEMENT_MAP = {};
+  for (const a of ACHIEVEMENTS) ACHIEVEMENT_MAP[a.id] = a;
+
+  function achievementById(id) {
+    return ACHIEVEMENT_MAP[id] || null;
+  }
+
+  function achievementUnlocked(a) {
+    return !!(a && SaveData.achievements[a.id]);
+  }
+
+  function unlockedAchievementCount() {
+    let n = 0;
+    for (const a of ACHIEVEMENTS) if (achievementUnlocked(a)) n++;
+    return n;
+  }
+
+  function achievementContext(won) {
+    return {
+      won: !!won,
+      difficulty: G.difficulty,
+      stats: SaveData.stats,
+      buys: {
+        cpu: buyTotal('cpu'),
+        gpu: buyTotal('gpu'),
+        ram: buyTotal('ram'),
+        ssd: buyTotal('ssd'),
+        software: buyTotal('software'),
+      },
+    };
+  }
+
+  // 结算时统一判定；silent 用于读档时按历史记录补发
+  function evaluateAchievements(won, silent) {
+    if (G.debugMode) return [];
+    const ctx = achievementContext(won);
+    const now = Date.now();
+    const newly = [];
+    for (const a of ACHIEVEMENTS) {
+      if (SaveData.achievements[a.id]) continue;
+      let ok = false;
+      try { ok = !!a.test(ctx); } catch (e) { ok = false; }
+      if (ok) {
+        SaveData.achievements[a.id] = now;
+        newly.push(a);
+      }
+    }
+    if (!silent) {
+      G.newAchievements = newly.map((a) => a.id);
+      if (newly.length) blip(980, 0.22, 'sine', 0.12, 1480);
+    }
+    return newly;
+  }
+
+  function backfillAchievements(notify) {
+    const before = unlockedAchievementCount();
+    evaluateAchievements(false, true);
+    const gained = unlockedAchievementCount() - before;
+    if (gained) {
+      persistSave();
+      if (notify) notifyMenu('已根据历史记录补发 ' + gained + ' 个成就', 5000);
+    }
+    return gained;
+  }
+
+  function applyAchievementPage(delta) {
+    const pages = Math.max(1, Math.ceil(ACHIEVEMENTS.length / 8));
+    G.achvPage = clamp((G.achvPage || 0) + delta, 0, pages - 1);
+    G.uiButtons.length = 0;
+    blip(delta > 0 ? 760 : 560, 0.06, 'sine', 0.06, delta > 0 ? 980 : 420);
+  }
+
+  function openAchievements(from) {
+    if (G.state !== 'menu' && G.state !== 'dead' && G.state !== 'win') return;
+    G.achvReturn = from || G.state;
+    G.achvPage = 0;
+    G.state = 'achievements';
+    G.uiButtons.length = 0;
+  }
+
+  function closeAchievements() {
+    if (G.state !== 'achievements') return;
+    G.state = G.achvReturn || 'menu';
+    G.uiButtons.length = 0;
+  }
+
   function resetGame() {
+    G.uiButtons.length = 0;
     G.state = 'playing';
     G.paused = false;
     G.speedMul = 1;
@@ -856,6 +1033,9 @@
     G.player.mana = RAMS[0].maxMana;
     G.shopCards = [];
     G.shopChosen = false;
+    G.newAchievements = [];
+    G.achvReturn = 'menu';
+    G.achvPage = 0;
   }
 
   // ---------------- 实体工厂 ----------------
@@ -1811,7 +1991,6 @@
         return;
       }
     }
-    if (G.state === 'dead' || G.state === 'win') { startNewGame(); return; }
   }
 
   // ---------------- 绘制 ----------------
@@ -1854,6 +2033,7 @@
     if (G.state === 'playing' && G.debugPanel) drawDebugPanel();
     if (G.state === 'menu') drawMenu();
     if (G.state === 'stats') drawStats();
+    if (G.state === 'achievements') drawAchievements();
     if (G.state === 'shop') drawShop();
     if (G.state === 'dead') drawGameOver();
     if (G.state === 'win') drawWin();
@@ -2861,10 +3041,11 @@
     // 统计 / 导出 / 导入
     const sw = 140, sh = 34, sy = H - 92;
     const sgap = 10;
-    const sx0 = W / 2 - (sw * 3 + sgap * 2) / 2;
+    const sx0 = W / 2 - (sw * 4 + sgap * 3) / 2;
     drawSmallButton('统计数据', sx0, sy, sw, sh, showStats);
-    drawSmallButton('导出存档', sx0 + sw + sgap, sy, sw, sh, exportSave);
-    drawSmallButton('导入存档', sx0 + (sw + sgap) * 2, sy, sw, sh, importSaveFile);
+    drawSmallButton('成就 ' + unlockedAchievementCount() + '/' + ACHIEVEMENTS.length, sx0 + sw + sgap, sy, sw, sh, () => openAchievements('menu'));
+    drawSmallButton('导出存档', sx0 + (sw + sgap) * 2, sy, sw, sh, exportSave);
+    drawSmallButton('导入存档', sx0 + (sw + sgap) * 3, sy, sw, sh, importSaveFile);
 
     // 背景音乐（设置单独存，不跟游戏存档走）
     drawAudioControls(34, H - 56);
@@ -3373,64 +3554,351 @@
     if (line) ctx.fillText(line, cx, yy);
   }
 
-  // ----- 结算 -----
-  function drawGameOver() {
-    G.uiButtons.length = 0;
-    ctx.fillStyle = 'rgba(10,4,10,0.86)';
-    ctx.fillRect(0, 0, W, H);
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 56px ' + FONT;
-    ctx.fillStyle = '#ff5a5a';
-    ctx.fillText('蓝屏了', W / 2, H / 2 - 110);
-    ctx.font = 'bold 18px ' + FONT;
-    ctx.fillStyle = 'rgba(210,200,220,0.85)';
-    ctx.fillText('你的矿卡烧了，但数据还在硬盘里', W / 2, H / 2 - 60);
+  // ----- 成就 UI -----
+  function alphaColor(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
 
+  function drawAchievementBadge(a, cx, cy, size, unlocked) {
+    const r = RARITIES[a.rarity] || RARITIES.common;
+    const rad = size / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (unlocked) { ctx.shadowBlur = 16; ctx.shadowColor = alphaColor(r.color, 0.55); }
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const ang = -Math.PI / 2 + i * Math.PI / 3;
+      const px = Math.cos(ang) * rad, py = Math.sin(ang) * rad;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = unlocked ? alphaColor(r.color, 0.16) : 'rgba(80,95,120,0.18)';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = unlocked ? r.color : 'rgba(125,145,175,0.34)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = unlocked ? r.color : 'rgba(145,165,195,0.55)';
+    const fs = a.badge.length >= 3 ? Math.max(9, Math.round(size * 0.22)) : Math.round(size * 0.28);
+    ctx.font = 'bold ' + fs + 'px ' + FONT_MONO;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(a.badge, 0, 1);
+    ctx.restore();
+  }
+
+  function drawRarityPill(a, x, y, fontPx) {
+    const r = RARITIES[a.rarity] || RARITIES.common;
+    const fs = fontPx || 10;
+    ctx.save();
+    ctx.font = 'bold ' + fs + 'px ' + FONT;
+    const w = ctx.measureText(r.name).width + 14, h = fs + 7;
+    ctx.fillStyle = alphaColor(r.color, 0.13);
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2); ctx.fill();
+    ctx.strokeStyle = alphaColor(r.color, 0.35);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2); ctx.stroke();
+    ctx.fillStyle = r.color;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(r.name, x + 7, y + h / 2 + 0.5);
+    ctx.restore();
+    return w;
+  }
+
+  function achievementDate(ts) {
+    const d = new Date(ts);
+    return d.getFullYear() + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' +
+      String(d.getDate()).padStart(2, '0');
+  }
+
+  function drawAchievementCard(a, x, y, w, h) {
+    const unlocked = achievementUnlocked(a);
+    const r = RARITIES[a.rarity] || RARITIES.common;
+    ctx.save();
+    ctx.fillStyle = unlocked ? 'rgba(10,18,32,0.95)' : 'rgba(8,12,22,0.72)';
+    ctx.strokeStyle = unlocked ? alphaColor(r.color, 0.6) : 'rgba(80,100,130,0.28)';
+    ctx.lineWidth = 1.3;
+    if (unlocked) { ctx.shadowBlur = 12; ctx.shadowColor = alphaColor(r.color, 0.18); }
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.stroke();
+    ctx.restore();
+
+    drawAchievementBadge(a, x + 44, y + h / 2, 52, unlocked);
+
+    const tx = x + 82;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = 'bold 16px ' + FONT;
+    ctx.fillStyle = unlocked ? '#eaf3ff' : 'rgba(170,190,215,0.7)';
+    ctx.fillText(a.name, tx, y + 27);
+    const nameW = ctx.measureText(a.name).width;
+    drawRarityPill(a, Math.min(tx + nameW + 10, x + w - 140), y + 15, 10);
+
+    ctx.font = '12px ' + FONT;
+    ctx.fillStyle = unlocked ? 'rgba(205,225,248,0.88)' : 'rgba(160,180,205,0.55)';
+    ctx.fillText(a.desc, tx, y + 50);
+
+    ctx.font = '11px ' + FONT;
+    ctx.fillStyle = unlocked ? 'rgba(150,180,215,0.85)' : 'rgba(140,160,190,0.5)';
+    ctx.fillText('条件：' + a.condition, tx, y + 73);
+
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 11px ' + FONT;
+    ctx.fillStyle = unlocked ? r.color : 'rgba(135,155,185,0.55)';
+    ctx.fillText(unlocked ? '✓ 已解锁' : '未解锁', x + w - 16, y + 26);
+    if (unlocked) {
+      ctx.font = '10px ' + FONT;
+      ctx.fillStyle = 'rgba(150,175,205,0.65)';
+      ctx.fillText(achievementDate(SaveData.achievements[a.id]), x + w - 16, y + 45);
+    }
+  }
+
+  function drawAchievements() {
+    G.uiButtons.length = 0;
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = '#05070d';
+    ctx.fillRect(0, 0, W, H);
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, 'rgba(16,30,52,0.55)');
+    bg.addColorStop(0.55, 'rgba(5,7,13,0)');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = 'bold 38px ' + FONT;
+    ctx.fillStyle = '#8ef2ff';
+    ctx.fillText('成就', W / 2, 56);
+    ctx.font = 'bold 13px ' + FONT;
+    ctx.fillStyle = 'rgba(170,195,230,0.75)';
+    ctx.fillText('装机之路，每一步都算数', W / 2, 82);
+
+    const total = ACHIEVEMENTS.length;
+    const unlocked = unlockedAchievementCount();
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 15px ' + FONT;
+    ctx.fillStyle = '#ffd166';
+    ctx.fillText(unlocked + ' / ' + total, W - 52, 56);
+
+    const pw = 320, px = W / 2 - pw / 2, py = 96;
+    ctx.fillStyle = 'rgba(80,110,150,0.25)';
+    ctx.beginPath(); ctx.roundRect(px, py, pw, 6, 3); ctx.fill();
+    if (unlocked) {
+      const g = ctx.createLinearGradient(px, 0, px + pw, 0);
+      g.addColorStop(0, '#8ef2ff');
+      g.addColorStop(1, '#ffd166');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.roundRect(px, py, pw * unlocked / total, 6, 3); ctx.fill();
+    }
+
+    const pageSize = 8;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    G.achvPage = clamp(G.achvPage || 0, 0, pages - 1);
+    const start = G.achvPage * pageSize;
+    const items = ACHIEVEMENTS.slice(start, start + pageSize);
+    const cw = 586, chh = 96, gapX = 24, gapY = 14;
+    const x0 = (W - (cw * 2 + gapX)) / 2;
+    const y0 = 120;
+    items.forEach((a, i) => {
+      const col = i % 2, row = Math.floor(i / 2);
+      drawAchievementCard(a, x0 + col * (cw + gapX), y0 + row * (chh + gapY), cw, chh);
+    });
+
+    if (pages > 1) {
+      drawSmallButton('上一页', W / 2 - 180, 562, 100, 34, () => applyAchievementPage(-1));
+      drawSmallButton('下一页', W / 2 + 80, 562, 100, 34, () => applyAchievementPage(1));
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 12px ' + FONT;
+      ctx.fillStyle = 'rgba(180,205,235,0.8)';
+      ctx.fillText('第 ' + (G.achvPage + 1) + ' / ' + pages + ' 页', W / 2, 581);
+    }
+    drawMenuButton(G.achvReturn === 'menu' ? '返回大厅' : '返回结算', W / 2 - 100, 610, 200, 44, '#8ef2ff', closeAchievements);
+    ctx.textAlign = 'center';
+    ctx.font = '11px ' + FONT;
+    ctx.fillStyle = 'rgba(140,165,195,0.55)';
+    ctx.fillText(pages > 1 ? '← → 切页 · Esc 返回' : 'Esc 返回', W / 2, 680);
+  }
+
+  function drawResultAchievementCard(a, x, y, w, h) {
+    const r = RARITIES[a.rarity] || RARITIES.common;
+    ctx.save();
+    ctx.fillStyle = 'rgba(8,14,26,0.94)';
+    ctx.strokeStyle = alphaColor(r.color, 0.55);
+    ctx.lineWidth = 1.5;
+    ctx.shadowBlur = 14;
+    ctx.shadowColor = alphaColor(r.color, 0.18);
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.stroke();
+    ctx.restore();
+
+    drawAchievementBadge(a, x + 40, y + 45, 50, true);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = 'bold 16px ' + FONT;
+    ctx.fillStyle = '#eaf3ff';
+    ctx.fillText(a.name, x + 74, y + 30);
+    const nw = ctx.measureText(a.name).width;
+    drawRarityPill(a, Math.min(x + 74 + nw + 8, x + w - 80), y + 18, 10);
+
+    ctx.font = '11px ' + FONT;
+    ctx.fillStyle = 'rgba(195,215,240,0.82)';
+    wrapText(a.desc, x + 18, y + 92, w - 36, 14);
+    ctx.textAlign = 'right';
+    ctx.font = '10px ' + FONT;
+    ctx.fillStyle = 'rgba(150,175,205,0.6)';
+    ctx.fillText(achievementDate(SaveData.achievements[a.id]), x + w - 16, y + h - 12);
+  }
+
+  // ----- 结算 -----
+  function drawRunResult(won) {
+    G.uiButtons.length = 0;
     const dd = diffOf(G.difficulty);
     const dr = SaveData.stats[G.difficulty] || emptyStats();
-    ctx.font = 'bold 20px ' + FONT;
-    ctx.fillStyle = '#cfe3ff';
-    ctx.fillText('难度 ' + dd.name + ' · 坚持 ' + fmtRunTime(G.playTime) + '   ·   第 ' + G.wave + ' 波', W / 2, H / 2 + 10);
-    ctx.fillText('击杀 ' + G.kills + '   ·   总伤害 ' + Math.floor(G.damageDealt), W / 2, H / 2 + 48);
 
-    ctx.font = 'bold 15px ' + FONT;
-    ctx.fillStyle = 'rgba(255,209,102,0.9)';
-    ctx.fillText('本难度纪录：第 ' + dr.bestWave + ' 波 · 击杀 ' + dr.bestKills, W / 2, H / 2 + 86);
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = won ? '#04100c' : '#0a040a';
+    ctx.fillRect(0, 0, W, H);
+    const glow = ctx.createRadialGradient(W / 2, 260, 60, W / 2, 260, 720);
+    glow.addColorStop(0, won ? 'rgba(35,95,82,0.18)' : 'rgba(105,22,34,0.16)');
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
 
-    ctx.font = 'bold 22px ' + FONT;
+    if (won) {
+      ctx.font = 'bold 54px ' + FONT;
+      const g = ctx.createLinearGradient(W / 2 - 300, 0, W / 2 + 300, 0);
+      g.addColorStop(0, '#7dffd4');
+      g.addColorStop(1, '#ffd166');
+      ctx.fillStyle = g;
+    } else {
+      ctx.font = 'bold 56px ' + FONT;
+      ctx.fillStyle = '#ff5a5a';
+    }
+    ctx.fillText(won ? '矿卡之王' : '蓝屏了', W / 2, 82);
+
+    ctx.font = 'bold 17px ' + FONT;
+    ctx.fillStyle = won ? 'rgba(210,235,255,0.9)' : 'rgba(210,200,220,0.85)';
+    ctx.fillText(won ? '双芯核弹被你打回废品站，这波不亏' : '你的矿卡烧了，但数据还在硬盘里', W / 2, 118);
+
+    const cy = 140, ch = 120;
+    ctx.save();
+    ctx.fillStyle = 'rgba(8,14,26,0.86)';
+    ctx.strokeStyle = 'rgba(90,130,180,0.28)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.roundRect(140, cy, 1000, ch, 14); ctx.fill(); ctx.stroke();
+    ctx.restore();
+
+    const cols = [265, 515, 765, 1015];
+    const labels = ['难度', won ? '用时' : '坚持', '波次', '击杀'];
+    const values = [dd.name, fmtRunTime(G.playTime), '第 ' + G.wave + ' 波', String(G.kills)];
+    for (let i = 0; i < 4; i++) {
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 11px ' + FONT;
+      ctx.fillStyle = 'rgba(150,180,215,0.75)';
+      ctx.fillText(labels[i], cols[i], cy + 26);
+      ctx.font = 'bold 22px ' + FONT;
+      ctx.fillStyle = '#eaf3ff';
+      ctx.fillText(values[i], cols[i], cy + 55);
+    }
+
+    ctx.textAlign = 'center';
+    ctx.font = '12px ' + FONT;
+    ctx.fillStyle = 'rgba(185,210,235,0.85)';
+    ctx.fillText('总伤害 ' + fmtNum(G.damageDealt) + '   ·   获得矿币 ' + fmtNum(G.goldEarned) +
+      '   ·   显卡技能 ' + G.skillCasts + ' 次', W / 2, cy + 85);
+    ctx.font = 'bold 12px ' + FONT;
+    ctx.fillStyle = 'rgba(255,209,102,0.85)';
+    ctx.fillText('本难度纪录：第 ' + dr.bestWave + ' 波 · 击杀 ' + dr.bestKills, W / 2, cy + 106);
+
+    const px = 140, py = 276, pw = 1000, ph = 246;
+    ctx.save();
+    ctx.fillStyle = 'rgba(8,14,26,0.90)';
+    ctx.strokeStyle = 'rgba(90,130,180,0.28)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 14); ctx.fill(); ctx.stroke();
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 18px ' + FONT;
     ctx.fillStyle = '#ffd166';
-    ctx.fillText('点击或按 R 再来一局', W / 2, H / 2 + 150);
+    ctx.fillText('本局新成就', px + 24, py + 30);
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 12px ' + FONT;
+    ctx.fillStyle = 'rgba(180,205,235,0.8)';
+    ctx.fillText('已解锁 ' + unlockedAchievementCount() + ' / ' + ACHIEVEMENTS.length, px + pw - 24, py + 29);
+
+    const newList = (G.newAchievements || [])
+      .map(achievementById)
+      .filter(Boolean)
+      .sort((a, b) => (RARITIES[b.rarity] || RARITIES.common).rank - (RARITIES[a.rarity] || RARITIES.common).rank);
+    if (G.debugMode) {
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 16px ' + FONT;
+      ctx.fillStyle = 'rgba(255,150,150,0.85)';
+      ctx.fillText('调试局不计入成就', W / 2, py + 120);
+      ctx.font = '12px ' + FONT;
+      ctx.fillStyle = 'rgba(180,160,175,0.7)';
+      ctx.fillText('正常对局结算时才会解锁成就。', W / 2, py + 145);
+    } else if (!newList.length) {
+      const allDone = unlockedAchievementCount() >= ACHIEVEMENTS.length;
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 18px ' + FONT;
+      ctx.fillStyle = allDone ? '#ffd166' : 'rgba(170,195,230,0.8)';
+      ctx.fillText(allDone ? '全部成就已解锁' : '本局没有解锁新成就', W / 2, py + 115);
+      ctx.font = '12px ' + FONT;
+      ctx.fillStyle = 'rgba(150,175,210,0.65)';
+      ctx.fillText(allDone ? '装机世界已经被你走完了。' : '打开「查看全部成就」看看还差哪一步。', W / 2, py + 142);
+    } else {
+      const show = newList.slice(0, 3);
+      const cw = 300, gap = 20;
+      const totalW = show.length * cw + (show.length - 1) * gap;
+      let ax = W / 2 - totalW / 2;
+      for (const a of show) {
+        drawResultAchievementCard(a, ax, py + 46, cw, 140);
+        ax += cw + gap;
+      }
+      if (newList.length > 3) {
+        ctx.textAlign = 'center';
+        ctx.font = '12px ' + FONT;
+        ctx.fillStyle = 'rgba(255,209,102,0.85)';
+        ctx.fillText('另有 ' + (newList.length - 3) + ' 个新成就，点击「查看全部成就」查看', W / 2, py + 218);
+      }
+    }
+
+    drawMenuButton('再来一局', W / 2 - 320, 546, 200, 46, '#8ef2ff', startNewGame);
+    drawMenuButton('查看全部成就', W / 2 - 100, 546, 200, 46, '#ffd166', () => openAchievements(G.state));
+    drawMenuButton('返回大厅', W / 2 + 120, 546, 200, 46, 'rgba(190,215,255,0.75)', () => {
+      G.state = 'menu';
+      G.uiButtons.length = 0;
+    });
+
+    ctx.textAlign = 'center';
+    ctx.font = '12px ' + FONT;
+    ctx.fillStyle = 'rgba(150,175,210,0.6)';
+    ctx.fillText('R 再来一局 · Esc 返回大厅', W / 2, 622);
+    if (won && G.justUnlocked) {
+      ctx.font = 'bold 14px ' + FONT;
+      ctx.fillStyle = '#ff8a8a';
+      ctx.fillText('已解锁：突然死亡模式（只有 1 滴血）', W / 2, 650);
+    }
+  }
+
+  function drawGameOver() {
+    drawRunResult(false);
   }
 
   function drawWin() {
-    G.uiButtons.length = 0;
-    ctx.fillStyle = 'rgba(4,12,16,0.86)';
-    ctx.fillRect(0, 0, W, H);
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 54px ' + FONT;
-    const g = ctx.createLinearGradient(W / 2 - 300, 0, W / 2 + 300, 0);
-    g.addColorStop(0, '#7dffd4'); g.addColorStop(1, '#ffd166');
-    ctx.fillStyle = g;
-    ctx.fillText('矿卡之王', W / 2, H / 2 - 100);
-    ctx.font = 'bold 20px ' + FONT;
-    ctx.fillStyle = 'rgba(210,235,255,0.9)';
-    ctx.fillText('双芯核弹被你打回废品站，这波不亏', W / 2, H / 2 - 50);
-    const dd = diffOf(G.difficulty);
-    const dr = SaveData.stats[G.difficulty] || emptyStats();
-    ctx.font = 'bold 18px ' + FONT;
-    ctx.fillStyle = '#cfe3ff';
-    ctx.fillText('难度 ' + dd.name + ' · 用时 ' + fmtRunTime(G.playTime) + '   ·   击杀 ' + G.kills, W / 2, H / 2 + 20);
-    ctx.font = 'bold 15px ' + FONT;
-    ctx.fillStyle = 'rgba(255,209,102,0.9)';
-    ctx.fillText('本难度纪录：第 ' + dr.bestWave + ' 波 · 击杀 ' + dr.bestKills, W / 2, H / 2 + 58);
-    if (G.justUnlocked) {
-      ctx.font = 'bold 16px ' + FONT;
-      ctx.fillStyle = '#ff5a5a';
-      ctx.fillText('已解锁：突然死亡模式（只有 1 滴血）', W / 2, H / 2 + 90);
-    }
-    ctx.font = 'bold 22px ' + FONT;
-    ctx.fillStyle = '#ffd166';
-    ctx.fillText('点击或按 R 再战一局', W / 2, G.justUnlocked ? H / 2 + 142 : H / 2 + 120);
+    drawRunResult(true);
   }
 
   // ---------------- 主循环 ----------------
@@ -3461,8 +3929,10 @@
   AC.muted = SaveData.muted;
   resetGame();
   G.state = 'menu';
+  backfillAchievements(true);
   window.__GAME = G;   // 调试用，正式版无副作用
   window.__SAVE = SaveData;
+  window.__ACHIEVEMENTS = ACHIEVEMENTS;
   window.__exportSaveText = exportSaveText;
   window.__importSaveText = importSaveText;
 
