@@ -17,7 +17,7 @@
   const FONT_MONO = 'Consolas,"Courier New",monospace';
 
   // ---------------- 场地 ----------------
-  const ARENA = { w: 2300, h: 1500 };
+  const ARENA = { w: 2600, h: 1800 };
 
   // ---------------- 画布与缩放 ----------------
   const W = 1280, H = 720;
