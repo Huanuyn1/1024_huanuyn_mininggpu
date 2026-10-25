@@ -3059,7 +3059,7 @@
 
     ctx.font = '14px ' + FONT;
     ctx.fillStyle = 'rgba(120,140,170,0.7)';
-    ctx.fillText('v0.9.1 · 1024 程序员节', W / 2, H - 30);
+    ctx.fillText('v0.9.5 · 1024 程序员节', W / 2, H - 30);
   }
 
   function drawDifficultyButtons(y) {

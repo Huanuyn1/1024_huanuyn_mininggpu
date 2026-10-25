@@ -66,7 +66,7 @@ CPU 八级，从赛扬 G5905 一路升到至强 Platinum 8380，射速和弹道�
 - 任意现代浏览器（Chrome / Edge / Firefox / Safari）
 - 不需要联网，不需要安装任何东西
 - 想跑本地服务的话：在这个目录执行 `python3 -m http.server 8000`，浏览器打开 `http://localhost:8000`
-- 当前版本：v0.9.1
+- 当前版本：v0.9.5
 
 ## 五、操作
 
