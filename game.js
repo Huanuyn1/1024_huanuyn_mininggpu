@@ -1151,23 +1151,52 @@
     });
   }
 
-  function spawnEnemyAround(type) {
-    const p = G.player;
+  function visibleRect(pad) {
+    return {
+      x0: G.cam.x - W / 2 - pad,
+      x1: G.cam.x + W / 2 + pad,
+      y0: G.cam.y - H / 2 - pad,
+      y1: G.cam.y + H / 2 + pad,
+    };
+  }
+
+  // 画面外、但离画面不远的一个点（Boss 登场 / 随机刷怪兜底）
+  function pointJustOutsideView(pad) {
+    const bx = ARENA.w / 2 - 90, by = ARENA.h / 2 - 90;
+    const x0 = G.cam.x - W / 2, x1 = G.cam.x + W / 2;
+    const y0 = G.cam.y - H / 2, y1 = G.cam.y + H / 2;
+    const edges = [];
+    if (x0 - pad >= -bx) edges.push('left');
+    if (x1 + pad <= bx) edges.push('right');
+    if (y0 - pad >= -by) edges.push('top');
+    if (y1 + pad <= by) edges.push('bottom');
+    if (edges.length) {
+      const edge = edges[Math.floor(Math.random() * edges.length)];
+      const yMin = clamp(y0, -by, by), yMax = clamp(y1, -by, by);
+      const xMin = clamp(x0, -bx, bx), xMax = clamp(x1, -bx, bx);
+      if (edge === 'left') return { x: x0 - pad, y: rnd(yMax, yMin) };
+      if (edge === 'right') return { x: x1 + pad, y: rnd(yMax, yMin) };
+      if (edge === 'top') return { x: rnd(xMax, xMin), y: y0 - pad };
+      return { x: rnd(xMax, xMin), y: y1 + pad };
+    }
+    return { x: G.cam.x >= 0 ? -bx : bx, y: G.cam.y >= 0 ? -by : by };
+  }
+
+  function spawnEnemyInArena(type) {
     const bx = ARENA.w / 2 - 40, by = ARENA.h / 2 - 40;
     const hpMul = 1 + G.wave * (tuning().hpGrowth || 0.26);
     const dmgMul = 1 + G.wave * 0.10;
-    for (let tries = 0; tries < 10; tries++) {
-      const a = rnd(TAU, 0);
-      const r = 480 + rnd(320, 0);
-      let x = p.x + Math.cos(a) * r;
-      let y = p.y + Math.sin(a) * r;
-      x = clamp(x, -bx, bx);
-      y = clamp(y, -by, by);
-      if (dist(x, y, p.x, p.y) < 280) continue;
+    // 当前画面（外加一圈缓冲）是安全区，不在可见范围里刷怪
+    const v = visibleRect(50);
+    for (let tries = 0; tries < 80; tries++) {
+      const x = rnd(bx, -bx);
+      const y = rnd(by, -by);
+      if (x > v.x0 && x < v.x1 && y > v.y0 && y < v.y1) continue;
       spawnEnemy(type, x, y, hpMul, dmgMul);
       return;
     }
-    spawnEnemy(type, clamp(p.x + 520, -bx, bx), clamp(p.y, -by, by), hpMul, dmgMul);
+    const pt = pointJustOutsideView(60);
+    spawnEnemy(type, pt.x, pt.y, hpMul, dmgMul);
   }
 
   function addParticles(x, y, color, n, speed, life) {
@@ -1520,8 +1549,8 @@
         G.enemies.length = 0;
         G.gold += 60;
         G.goldEarned += 60;
-        const bbx = ARENA.w / 2 - 90, bby = ARENA.h / 2 - 90;
-        spawnEnemy('boss', clamp(p2.x + 600, -bbx, bbx), clamp(p2.y - 300, -bby, bby), 1, 1);
+        const bp = pointJustOutsideView(140);
+        spawnEnemy('boss', bp.x, bp.y, 1, 1);
         addText(p2.x, p2.y - 90, 'Boss 出现：GTX 690 双芯核弹', '#ff3df0', 30);
         addText(p2.x, p2.y - 56, '清场 +60 矿币', '#ffd166', 18);
         addShake(20);
@@ -1538,7 +1567,7 @@
       while (G.spawnAcc >= 1) {
         G.spawnAcc -= 1;
         if (G.enemies.length >= cap) break;
-        spawnEnemyAround(spawnTypeForWave(G.wave, Math.random()));
+        spawnEnemyInArena(spawnTypeForWave(G.wave, Math.random()));
       }
     }
 
